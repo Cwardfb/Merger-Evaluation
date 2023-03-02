@@ -1,0 +1,366 @@
+---
+title: "Change in Competition due to Merger: Nested Logit"
+output: 
+  html_document: 
+    code_folding: show
+    toc: TRUE
+    toc_float: TRUE
+---
+```{r , echo=FALSE}
+library(haven)
+cars <- read_dta("C:/Users/wardc/Downloads/cars_2004 (1).dta")
+```
+
+
+```{r, warning=FALSE, echo=FALSE, include=FALSE}
+packages<-c("rsample","tidyverse","matlib","ggplot2","jtools","broom","gridExtra","dplyr","psych","regclass","stargazer")
+invisible(lapply(packages, library, character.only=TRUE))
+```
+
+
+## Nested Logit
+
+The nested logit model for merger simulation works similar to the plain logit model for merger simulation. The main difference between the two models is that the nested model assumes that product substitution varies for similar products that compete within a larger market. An intuitive example would be to think about the market for automobiles. An increase in the price of a Honda Civic is unlikely to lead to a person substituting to a much more expensive vehicle like an Audi or BMW but they may be more likely to substitute with a Huyundae or Kia. The nested model takes this into account by estimating separate cross price elasticities for products within the same nest and products in different nests in the same market. In this case vehicle markets are divided into 6 segments.
+
+
+```{r construct data set and instrument vars}
+#Add market size column and assign corresponding year's value
+cars <- cbind.data.frame(cars,matrix(,nrow = 284, ncol = 1,dimnames=list(c(),c("TAM"))))
+
+cars$TAM[which(cars$year==2003)] <- 111278000
+cars$TAM[which(cars$year==2004)] <- 112000000
+cars$TAM[which(cars$year==2005)] <- 113343000
+cars$TAM[which(cars$year==2006)] <- 114384000
+
+#generate market share
+cars$Marketshare <- cars$Tvolume / cars$TAM
+cars$Sales.Nest <- with(cars, ave(Tvolume, year, segment, FUN= sum))
+cars$Nest.share <- cars$Tvolume / cars$Sales.Nest
+
+#generate the total sale volume within a market
+cars$Total.inside <- with(cars, ave(Tvolume, year, FUN=sum))
+
+#generate the outside share for each market
+cars$Outside.Share <- 1 - (cars$Total.inside/cars$TAM)
+
+#generate the utility variable
+cars$u <- log(cars$Marketshare) - log(cars$Outside.Share)
+
+#total product characteristics
+market.dpm <- with(cars, ave(dpm, year, segment, FUN=sum))
+market.length <- with(cars, ave(length, year,segment, FUN=sum))
+market.hpw <- with(cars, ave(hpw, year, segment, FUN=sum))
+cars <- cbind.data.frame(cars, market.dpm , market.length , market.hpw)
+
+#number of competitors
+cars$temp <- 1
+cars$total.comp <- with(cars, ave(temp, year, segment, FUN=sum))
+
+#create IV's
+cars$IV.dpm <- (cars$market.dpm - cars$dpm)/(cars$total.comp - 1)
+cars$IV.length <- (cars$market.length - cars$length)/ (cars$total.comp -1)
+cars$IV.hpw <- (cars$market.hpw - cars$hpw) / (cars$total.comp - 1)
+cars$ln.nest <- log(cars$Nest.share)
+```
+
+We use a regression model to estimate a vehicle demand function.
+
+```{css, echo=FALSE}
+table{
+ margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+}
+
+tr:nth-child(odd){
+ border-bottom: 1px solid #ddd;
+ }
+tr:hover{
+background-color: coral;
+}
+```
+
+```{r Q1 iv reg,fig.align='center',results='asis'}
+library("ivreg")
+cars$year<-factor(cars$year, levels=c("2004","2003","2005","2006"))
+cars$mfrid<-factor(cars$mfrid)
+cars$mfrid<-relevel(cars$mfrid,ref=12)
+
+IV.reg <- ivreg(u ~ dpm + length + hpw + year + mfrid  | price + ln.nest| IV.dpm + IV.length +IV.hpw, data = cars )
+
+alpha <- IV.reg$coefficients[2]
+sigma <- IV.reg$coefficients[3]
+
+paste("Note that our coefficient for the IV estimate of price is",round(alpha,3)," and our correlation coefficient is ",round(sigma,3)," ,rounded to the third decimal place")
+
+stargazer(IV.reg,type="html",title="IV regression",no.space=TRUE)
+
+```
+
+
+
+```{r}
+cars2004 <- cars[which(cars$year ==2004),]
+
+elastic<- matrix(0, nrow = nrow(cars2004), ncol = nrow(cars2004), dimnames=list(as.character(cars2004$model),as.character(cars2004$model)))
+
+
+for (j in 1:100) {
+  for (l in 1:100) {
+    if (j == l) {
+       elastic[j,l] <- ((alpha*cars2004$price[j])/(1- sigma))*(1- sigma*cars2004$Nest.share[j] - (1-sigma)*cars2004$Marketshare[j])
+         }
+    else { if (cars$segment[j] != cars2004$segment[l]) {
+      elastic[j,l] <- - alpha* cars2004$price[l]* cars2004$Marketshare[l]}
+      else{ 
+        elastic[j,l] <- ((-alpha* cars2004$price[j]) /(1-sigma)) * 
+         (((sigma*cars2004$Marketshare[l]*cars2004$Nest.share[j])/cars2004$Marketshare[j]) +
+            (1-sigma)*cars2004$Marketshare[l])}
+      }
+    }
+}
+
+```
+Given the coefficients from our model we construct own, cross, and within nest price elasticities for each vehicle. Below are the elasticities for Camry, Civic, Mazda 3 and Audi A6.
+
+
+```{r Q2,results="asis",fig.show="hold"}
+# row.names(elastic) <- as.character(cars2004$model)
+# colnames(elastic) <- as.character(cars2004$model)
+# Q3 <- as.data.frame(elastic)
+# Q3 <- cbind.data.frame(Q3$CAMRY, Q3$CIVIC, Q3$'3', Q3$`AUDI A6`)
+# colnames(Q3) <- c("Camry","Civic","3","Audi A6")
+# rownames(Q3) <- as.character(cars2004$model)
+# head(Q3)
+
+Q3 <- data.frame(Camry=elastic[,'CAMRY'], Civic=elastic[,"CIVIC"], Mazda.3=elastic[,'3'], AUDI.A6=elastic[,"AUDI A6"],row.names=as.character(cars2004$model))
+
+stargazer(Q3,type="html",title="Specific models",summary=FALSE)
+
+```
+
+
+```{r}
+Partial.matrix <- matrix(0, nrow(cars2004), nrow(cars2004))
+
+for (j in 1:100) {
+  for (l in 1:100) {
+    if (j == l) {
+       Partial.matrix[j,l] <- ((alpha*cars2004$price[j]*cars2004$Marketshare[j])/(1- sigma)) * 
+          (1- sigma*cars2004$Nest.share[j]- (1-sigma)*cars2004$Marketshare[j])}
+    
+    else{ if (cars$segment[j] != cars2004$segment[l]) {
+      Partial.matrix[j,l] <- - alpha* cars2004$Marketshare[j]* cars2004$Marketshare[l]}
+      else {
+        Partial.matrix[j,l] <-  ((cars2004$Marketshare[l]*alpha*cars2004$price[j])/(cars2004$price[l]*(1-sigma))) * 
+         (((sigma*cars2004$Marketshare[l]*cars2004$Nest.share[j])/cars2004$Marketshare[j]) +
+            ((1-sigma)*cars2004$Marketshare[l]))}
+          }
+    }
+}
+```
+
+
+
+
+
+```{r}
+ownership.Matrix <- matrix(0, nrow(cars2004), nrow(cars2004))
+
+
+for (i in 1:nrow(cars2004)) {
+  for (j in 1:nrow(cars2004)) {
+    if (cars2004$mfrid[i]==cars2004$mfrid[j]) {
+      ownership.Matrix[i,j]=1
+    }
+  }
+}
+
+
+
+mul <- Partial.matrix * ownership.Matrix
+mul.inverse <- solve(Partial.matrix * ownership.Matrix)
+#marginal Cost 
+
+Marginal.cost <- cars2004$price + (mul.inverse %*% cars2004$Marketshare)
+Marginal.cost <- as.data.frame(Marginal.cost)
+colnames(Marginal.cost) <- "Marginal.cost"
+Lerner.Index <- matrix(, nrow = 100, ncol = 1)
+colnames(Lerner.Index) <- "Lerner.Index"
+for (i in 1:100) {
+  Lerner.Index[i,1] <- (cars2004$price[i] - Marginal.cost[i,1]) / cars2004$price[i]
+}
+
+```
+
+
+
+
+```{r, echo=FALSE, fig.show="hold", out.width="50%",warning=FALSE}
+data <- data.frame(Lerner.Index)
+
+# Plot the histogram with a red fill color
+ggplot(data.frame(Lerner.Index = data), aes(Lerner.Index, fill = "Lerner Indexes")) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 20) +
+  geom_vline(aes(xintercept = mean(Lerner.Index), color = paste0("Mean = ",round(mean(Lerner.Index),3))),size=1.5)+
+  geom_vline(aes(xintercept = max(Lerner.Index), color = paste0("Max = ",round(max(Lerner.Index),3))),size=1.5)+
+  geom_vline(aes(xintercept = min(Lerner.Index), color = paste0("Min = ",round(min(Lerner.Index),3))),size=1.5)+
+  scale_color_manual(values = c("blue", "orange","purple"), name = "Summary Statistics", labels = c(paste0("Max = ",round(max(Lerner.Index),3)),paste0("Mean = ",round(mean(Lerner.Index),3)), paste0("Min = ",round(min(Lerner.Index),3))))+
+  scale_fill_manual(values = "steelblue")+
+  ggtitle("Lerner Indexes Prior to Merger")+
+            theme(text=element_text(size = 14))
+
+data <- data.frame(Marginal.cost)
+
+# Plot the histogram with a red fill color
+ggplot(data.frame(Marginal.cost = data), aes(Marginal.cost, fill = "Marginal Cost")) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 20) +
+  scale_fill_manual(values = "bisque3")+
+  ggtitle("Marginal Cost")+
+  geom_vline(aes(xintercept = mean(Marginal.cost), color = paste0("Mean = 30.927")),size=1.5)+
+  geom_vline(aes(xintercept = max(Marginal.cost), color = paste0("Max = ",round(max(Marginal.cost),3))),size=1.5)+
+  geom_vline(aes(xintercept = min(Marginal.cost), color = paste0("Min = ",round(min(Marginal.cost),3))),size=1.5)+
+  scale_color_manual(values = c("blue", "orange","purple"), name = "Summary Statistics", labels = c(paste0("Max = ",round(max(Marginal.cost),3)),paste0("Mean = 30.927"), paste0("Min = ",round(min(Marginal.cost),3))))+
+            theme(text=element_text(size = 14))
+
+```
+
+Similairly to the logit model there is some variation in marginal costs across the different vehicles in the data set. This makes intuitive sense as we should expect that luxury cars have higher marginal costs than compacts and cheaper vehicle types. In the Lerner index, however we see that there is less variation in the nested logit than the original logit model. This could be because the nested logit model is more specific when calculating demand for vehicles by incorporating substitution within nests, rather than assuming that customers substitute between all products in the market equally. This gives us estimates for marginal cost that are closer to the observed prices in the data set, which leads less variance in the Lerner index. 
+
+
+Have price changes after merger. Assume that marginal costs say the same.
+
+* we have the price changes in vector Price.After need to calculate price change percentage.
+
+
+
+
+```{r}
+cars2004$mfrid.new <- cars2004$mfrid
+cars2004$mfrid.new[which(cars2004$mfrid ==9)] <- 8
+cars$mfrid.new <- cars$mfrid
+cars$mfrid.new[which(cars$mfrid ==9)] <- 8
+# gen new alpha with new ownership
+IV.reg <- ivreg(u ~ dpm + length + hpw + factor(year) + factor(mfrid.new)  | price + ln.nest| IV.dpm + IV.length + IV.hpw, data = cars )
+summary(IV.reg)
+alpha.2 <- IV.reg$coefficients[2]
+sigma.2 <- IV.reg$coefficients[3]
+
+
+ownership.Matrix.2 <- matrix(0, nrow(cars2004), nrow(cars2004))
+
+for (i in 1:nrow(cars2004)) {
+  for (j in 1:nrow(cars2004)) {
+    if (cars2004$mfrid.new[i]==cars2004$mfrid.new[j]) {
+      ownership.Matrix.2[i,j]=1
+    }
+  }
+}
+
+Partial.matrix.2 <- matrix(0, nrow(cars2004), nrow(cars2004))
+
+for (j in 1:100) {
+  for (l in 1:100) {
+    if (j == l) {
+       Partial.matrix.2[j,l] <- ((alpha.2*cars2004$price[j]*cars2004$Marketshare[j])/(1- sigma.2)) * 
+          (1- sigma.2*cars2004$Nest.share[j]- (1-sigma.2)*cars2004$Marketshare[j])
+         }
+    
+    else{ if (cars$segment[j] != cars2004$segment[l]) {
+      Partial.matrix.2[j,l] <- - alpha.2* cars2004$Marketshare[j]* cars2004$Marketshare[l]}
+      else {
+        Partial.matrix.2[j,l] <-  ((cars2004$Marketshare[l]*alpha.2*cars2004$price[j])/(cars2004$price[l]*(1-sigma.2))) * 
+         (((sigma.2*cars2004$Marketshare[l]*cars2004$Nest.share[j])/cars2004$Marketshare[j]) +
+            ((1-sigma.2)*cars2004$Marketshare[l]))}
+          }
+    }
+}
+
+mul.2 <- ownership.Matrix.2 * Partial.matrix.2
+mul.2.inverse <- solve(mul.2)
+Price.After <- Marginal.cost - (mul.2.inverse %*% cars2004$Marketshare)
+
+price_change<-data.frame(change=c(rep(0,100)),mfrid=cars2004$mfrid.new,mfrid.name=cars2004$mfrid_name)
+price_change[,1]<-(Price.After-cars2004$price)/cars2004$price
+
+
+delta_means<-data.frame(means=rep(0,13))
+for(i in 1:13){
+  delta_means[i,]<-mean(price_change[price_change$mfrid==i,1])
+}
+
+
+rownames(delta_means) <- c(1:13)
+delta_means
+
+```
+
+We see that the average price change for firms is small which suggests that this merger isn't having a significant effect on competition. Price changes for the other firms in the market are also relatively small. 
+
+
+
+Next we calculate a lerner index value for each vehicle in the market to see if the merger leads to firms pricing significantly above marginal cost.
+
+
+```{r, echo=FALSE}
+
+Lerner.Index.after <- matrix(,nrow = 100, ncol = 1)
+for (i in 1:100) {
+  Lerner.Index.after[i,1] <- (Price.After[i,1] - Marginal.cost[i,1])/ Price.After[i,1]
+}
+
+Lerner_after <- data.frame(Lerner_after = Lerner.Index.after)
+
+# Plot the histogram with a red fill color
+ggplot(Lerner_after, aes(Lerner_after, fill = "Lerner Indexes")) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 20) +
+  geom_vline(aes(xintercept = mean(Lerner_after), color = paste0("Mean = ",round(sum(Lerner_after)/100,3))),size=1.5)+
+  geom_vline(aes(xintercept = max(Lerner_after), color = paste0("Max = ",round(max(Lerner_after),3))),size=1.5)+
+  geom_vline(aes(xintercept = min(Lerner_after), color = paste0("Min = ",round(min(Lerner_after),3))),size=1.5)+
+  scale_color_manual(values = c("blue", "orange","purple"), name = "Summary Statistics", labels = c(paste0("Max = ",round(max(Lerner_after),3)),paste0("Mean = ",round(sum(Lerner_after)/100,3)), paste0("Min = ",round(min(Lerner_after),3))))+
+  scale_fill_manual(values = "steelblue")+
+  ggtitle("Lerner Indexes After Merger")+
+            theme(text=element_text(size = 14))
+ 
+
+```
+```{r, echo=FALSE}
+
+df <- data.frame(Lerner_Index = c(Lerner.Index, Lerner.Index.after), 
+                 group = c(rep("before", 100), rep("after", 100)))
+
+# Plot the histograms with different colors
+ggplot(df, aes(Lerner_Index, fill = group)) +
+  geom_histogram(alpha = 0.5, position = "identity" , bins = 20) +
+  scale_fill_manual(values = c( "darkseagreen", "steelblue"))+
+  ggtitle("Lerner Indexes Before and After Merger")
+  
+ 
+```
+We see that firms are pricing higher above marginal cost after the merger which implies that the market is less compeditive, however based on the magnitude of these price changes we can assume that the change in market power is not significant. 
+
+
+
+```{r, results='asis'}
+
+mf2_after<-0
+for(i in 1:13){
+mf1<-subset(cars2004, mfrid.new==i,select=c(Tvolume))
+mf1<-(mf1/sum(cars2004$Tvolume))*100
+mf2_after<-sum(mf1)^2+mf2_after
+}
+
+mf2_before<-0
+for(i in 1:13){
+mf1<-subset(cars2004, mfrid==i,select=c(Tvolume))
+mf1<-(mf1/sum(cars2004$Tvolume))*100
+mf2_before<-sum(mf1)^2+mf2_before
+}
+
+HHI<-data.frame(Before=mf2_before,After=mf2_after)
+stargazer(HHI,type="html",title="HHI Before and After Merger",summary=FALSE)
+view(HHI)
+```
+
+Note that the HHI is an industry wide measure and is not significantly impacted by this one firm merging within a specific segment. We can rule out segments as an influence on HHI
+We can see that the market does become slightly more concentrated, however with such a small increase at this level of concentration the market authorities should not be concerned. An HHI Index below 2000 is generally not to be worried about.
